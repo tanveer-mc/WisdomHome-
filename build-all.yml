@@ -1,0 +1,673 @@
+name: Build Wisdom Home APK
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+      - name: Generate project files
+        run: |
+          cat > settings.gradle <<'EOF_FILE_0'
+          pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
+          dependencyResolutionManagement { repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS); repositories { google(); mavenCentral() } }
+          rootProject.name = 'WisdomHomeLauncherJava'
+          include ':app'
+          EOF_FILE_0
+          cat > build.gradle <<'EOF_FILE_1'
+          plugins {
+              id 'com.android.application' version '8.5.2' apply false
+          }
+          EOF_FILE_1
+          cat > gradle.properties <<'EOF_FILE_2'
+          org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
+          android.useAndroidX=true
+          EOF_FILE_2
+          mkdir -p app
+          cat > app/build.gradle <<'EOF_FILE_3'
+          plugins {
+              id 'com.android.application'
+          }
+
+          android {
+              namespace 'com.wisdom.home'
+              compileSdk 34
+
+              defaultConfig {
+                  applicationId 'com.wisdom.home'
+                  minSdk 23
+                  targetSdk 28
+                  versionCode 1
+                  versionName '1.1'
+              }
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_1_8
+                  targetCompatibility JavaVersion.VERSION_1_8
+              }
+              lint {
+                  abortOnError false
+                  checkReleaseBuilds false
+              }
+          }
+          EOF_FILE_3
+          mkdir -p app/src/main
+          cat > app/src/main/AndroidManifest.xml <<'EOF_FILE_4'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-feature android:name="android.software.leanback" android:required="false" />
+              <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
+              <uses-permission android:name="android.permission.INTERNET" />
+              <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />
+              <uses-permission android:name="android.permission.REQUEST_DELETE_PACKAGES" />
+              <application
+                  android:allowBackup="false"
+                  android:label="Wisdom Home"
+                  android:icon="@android:drawable/sym_def_app_icon"
+                  android:banner="@android:drawable/sym_def_app_icon"
+                  android:usesCleartextTraffic="false"
+                  android:theme="@android:style/Theme.Material.NoActionBar">
+                  <activity
+                      android:name=".MainActivity"
+                      android:configChanges="keyboard|keyboardHidden|orientation|screenSize"
+                      android:exported="true"
+                      android:launchMode="singleTask"
+                      android:screenOrientation="landscape">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                          <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+                  <!-- Disabled by default. Enabled from Launcher settings > Home mode. -->
+                  <activity-alias
+                      android:name=".HomeAlias"
+                      android:enabled="false"
+                      android:exported="true"
+                      android:targetActivity=".MainActivity">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.HOME" />
+                          <category android:name="android.intent.category.DEFAULT" />
+                      </intent-filter>
+                  </activity-alias>
+              </application>
+          </manifest>
+          EOF_FILE_4
+          mkdir -p app/src/main/java/com/wisdom/home
+          cat > app/src/main/java/com/wisdom/home/MainActivity.java <<'EOF_FILE_5'
+          package com.wisdom.home;
+
+          import android.app.Activity;
+          import android.content.ComponentName;
+          import android.content.Context;
+          import android.content.Intent;
+          import android.content.pm.PackageManager;
+          import android.content.pm.ResolveInfo;
+          import android.graphics.Color;
+          import android.media.AudioManager;
+          import android.media.tv.TvContract;
+          import android.media.tv.TvInputInfo;
+          import android.media.tv.TvInputManager;
+          import android.net.Uri;
+          import android.os.Bundle;
+          import android.provider.Settings;
+          import android.view.KeyEvent;
+          import android.view.View;
+          import android.view.Window;
+          import android.view.WindowManager;
+          import android.webkit.JavascriptInterface;
+          import android.webkit.WebChromeClient;
+          import android.webkit.WebSettings;
+          import android.webkit.WebView;
+          import android.webkit.WebViewClient;
+          import android.widget.Toast;
+          import org.json.JSONArray;
+          import org.json.JSONObject;
+          import java.util.ArrayList;
+          import java.util.Collections;
+          import java.util.Comparator;
+          import java.util.HashSet;
+          import java.util.List;
+          import java.util.Locale;
+          import java.util.Set;
+
+          /**
+           * Wisdom Home: the launcher UI (assets/index.html) runs inside a WebView and
+           * talks to Android through the "Android" JavaScript bridge below.
+           */
+          public class MainActivity extends Activity {
+              private WebView webView;
+
+              @Override
+              protected void onCreate(Bundle savedInstanceState) {
+                  super.onCreate(savedInstanceState);
+                  requestWindowFeature(Window.FEATURE_NO_TITLE);
+                  getWindow().setStatusBarColor(Color.BLACK);
+                  getWindow().setNavigationBarColor(Color.BLACK);
+                  getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+                  enterImmersiveMode();
+
+                  webView = new WebView(this);
+                  webView.setBackgroundColor(Color.rgb(11, 18, 32));
+                  webView.setFocusable(true);
+                  webView.setFocusableInTouchMode(true);
+                  webView.setOverScrollMode(View.OVER_SCROLL_NEVER);
+
+                  WebSettings settings = webView.getSettings();
+                  settings.setJavaScriptEnabled(true);
+                  settings.setDomStorageEnabled(true); // localStorage keeps launcher preferences
+                  settings.setMediaPlaybackRequiresUserGesture(false);
+                  settings.setSupportMultipleWindows(false);
+                  settings.setDefaultTextEncodingName("UTF-8");
+
+                  webView.setWebViewClient(new WebViewClient() {
+                      // The launcher page never navigates away; any web link opens outside.
+                      @SuppressWarnings("deprecation")
+                      @Override
+                      public boolean shouldOverrideUrlLoading(WebView view, String url) {
+                          if (url != null && url.startsWith("file:")) return false;
+                          if (url != null) startIntent(new Intent(Intent.ACTION_VIEW, Uri.parse(url)));
+                          return true;
+                      }
+                  });
+                  webView.setWebChromeClient(new WebChromeClient());
+                  webView.addJavascriptInterface(new Bridge(), "Android");
+                  setContentView(webView);
+                  webView.loadUrl("file:///android_asset/index.html");
+                  webView.requestFocus();
+              }
+
+              private void enterImmersiveMode() {
+                  getWindow().getDecorView().setSystemUiVisibility(
+                          View.SYSTEM_UI_FLAG_FULLSCREEN
+                          | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                          | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+                          | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                          | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+                          | View.SYSTEM_UI_FLAG_LAYOUT_STABLE);
+              }
+
+              // ---------- helpers ----------
+              private void toast(final String s) {
+                  runOnUiThread(new Runnable() {
+                      @Override public void run() { Toast.makeText(MainActivity.this, s, Toast.LENGTH_LONG).show(); }
+                  });
+              }
+
+              private boolean startIntent(Intent i) {
+                  try {
+                      i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                      startActivity(i);
+                      return true;
+                  } catch (Exception e) {
+                      toast("Could not open: " + e.getClass().getSimpleName());
+                      return false;
+                  }
+              }
+
+              private String norm(String s) {
+                  return s.toLowerCase(Locale.ROOT).replaceAll("[^a-z0-9]", "");
+              }
+
+              /** Launchable apps as {label, package}, sorted by label. */
+              private List<String[]> installed() {
+                  PackageManager pm = getPackageManager();
+                  List<String[]> list = new ArrayList<String[]>();
+                  Set<String> seen = new HashSet<String>();
+                  String[] cats = { Intent.CATEGORY_LEANBACK_LAUNCHER, Intent.CATEGORY_LAUNCHER };
+                  for (String cat : cats) {
+                      Intent q = new Intent(Intent.ACTION_MAIN).addCategory(cat);
+                      for (ResolveInfo ri : pm.queryIntentActivities(q, 0)) {
+                          String pkg = ri.activityInfo.packageName;
+                          if (pkg.equals(getPackageName()) || !seen.add(pkg)) continue;
+                          list.add(new String[] { String.valueOf(ri.loadLabel(pm)), pkg });
+                      }
+                  }
+                  Collections.sort(list, new Comparator<String[]>() {
+                      @Override public int compare(String[] a, String[] b) {
+                          return a[0].toLowerCase(Locale.ROOT).compareTo(b[0].toLowerCase(Locale.ROOT));
+                      }
+                  });
+                  return list;
+              }
+
+              private boolean launchPackage(String pkg) {
+                  PackageManager pm = getPackageManager();
+                  Intent i = pm.getLeanbackLaunchIntentForPackage(pkg);
+                  if (i == null) i = pm.getLaunchIntentForPackage(pkg);
+                  if (i == null) { toast("This app has no launch screen"); return false; }
+                  return startIntent(i);
+              }
+
+              // ---------- JavaScript bridge ----------
+              private class Bridge {
+                  @JavascriptInterface
+                  public String apps() {
+                      JSONArray arr = new JSONArray();
+                      try {
+                          for (String[] a : installed()) {
+                              JSONObject o = new JSONObject();
+                              o.put("n", a[0]);
+                              o.put("p", a[1]);
+                              arr.put(o);
+                          }
+                      } catch (Exception ignored) { }
+                      return arr.toString();
+                  }
+
+                  @JavascriptInterface
+                  public boolean launch(String pkg) { return launchPackage(pkg); }
+
+                  /** Launch the installed app whose name matches (case/space insensitive). */
+                  @JavascriptInterface
+                  public boolean launchLabel(String label) {
+                      String t = norm(label);
+                      List<String[]> all = installed();
+                      for (String[] a : all) if (norm(a[0]).equals(t)) return launchPackage(a[1]);
+                      for (String[] a : all) if (norm(a[0]).contains(t)) return launchPackage(a[1]);
+                      return false;
+                  }
+
+                  @JavascriptInterface
+                  public void settings(String what) {
+                      String action;
+                      if ("wifi".equals(what)) action = Settings.ACTION_WIFI_SETTINGS;
+                      else if ("bt".equals(what)) action = Settings.ACTION_BLUETOOTH_SETTINGS;
+                      else if ("display".equals(what)) action = Settings.ACTION_DISPLAY_SETTINGS;
+                      else if ("network".equals(what)) action = Settings.ACTION_WIRELESS_SETTINGS;
+                      else action = Settings.ACTION_SETTINGS;
+                      startIntent(new Intent(action));
+                  }
+
+                  /** Try to switch to "HDMI 1", "AV 1", "ATV" ... Returns a message for the screen. */
+                  @JavascriptInterface
+                  public String input(String name) {
+                      try {
+                          TvInputManager tm = (TvInputManager) getSystemService(Context.TV_INPUT_SERVICE);
+                          String nn = norm(name);
+                          int type = nn.startsWith("hdmi") ? TvInputInfo.TYPE_HDMI
+                                  : nn.startsWith("av") ? TvInputInfo.TYPE_COMPOSITE : TvInputInfo.TYPE_TUNER;
+                          String digits = nn.replaceAll("\\D", "");
+                          int num = digits.length() == 0 ? 1 : Integer.parseInt(digits);
+                          List<TvInputInfo> match = new ArrayList<TvInputInfo>();
+                          for (TvInputInfo ti : tm.getTvInputList()) if (ti.getType() == type) match.add(ti);
+                          Collections.sort(match, new Comparator<TvInputInfo>() {
+                              @Override public int compare(TvInputInfo a, TvInputInfo b) { return a.getId().compareTo(b.getId()); }
+                          });
+                          TvInputInfo pick = null;
+                          for (TvInputInfo ti : match) {
+                              if (norm(String.valueOf(ti.loadLabel(MainActivity.this))).equals(nn)) pick = ti;
+                          }
+                          if (pick == null && num >= 1 && num <= match.size()) pick = match.get(num - 1);
+                          if (pick == null) return name + ": input not found on this TV";
+                          if (pick.isPassthroughInput()) {
+                              boolean ok = startIntent(new Intent(Intent.ACTION_VIEW,
+                                      TvContract.buildChannelUriForPassthroughInput(pick.getId())));
+                              return ok ? "Switching to " + name : "Could not switch to " + name;
+                          }
+                          boolean ok = startIntent(new Intent(Intent.ACTION_VIEW, TvContract.Channels.CONTENT_URI));
+                          return ok ? "Opening TV" : "Could not open TV";
+                      } catch (Exception e) {
+                          return "Could not switch: " + e.getClass().getSimpleName();
+                      }
+                  }
+
+                  /** delta in steps (+1 / -1), 0 just reads. Returns volume percent. */
+                  @JavascriptInterface
+                  public int volume(int delta) {
+                      try {
+                          AudioManager am = (AudioManager) getSystemService(Context.AUDIO_SERVICE);
+                          int max = am.getStreamMaxVolume(AudioManager.STREAM_MUSIC);
+                          int cur = am.getStreamVolume(AudioManager.STREAM_MUSIC);
+                          if (delta != 0) {
+                              cur = Math.max(0, Math.min(max, cur + delta));
+                              am.setStreamVolume(AudioManager.STREAM_MUSIC, cur, AudioManager.FLAG_SHOW_UI);
+                          }
+                          return max == 0 ? 0 : cur * 100 / max;
+                      } catch (Exception e) { return 0; }
+                  }
+
+                  @JavascriptInterface
+                  public boolean isMuted() {
+                      try {
+                          AudioManager am = (AudioManager) getSystemService(Context.AUDIO_SERVICE);
+                          return am.isStreamMute(AudioManager.STREAM_MUSIC);
+                      } catch (Exception e) { return false; }
+                  }
+
+                  @JavascriptInterface
+                  public boolean mute() {
+                      try {
+                          AudioManager am = (AudioManager) getSystemService(Context.AUDIO_SERVICE);
+                          boolean m = am.isStreamMute(AudioManager.STREAM_MUSIC);
+                          am.adjustStreamVolume(AudioManager.STREAM_MUSIC,
+                                  m ? AudioManager.ADJUST_UNMUTE : AudioManager.ADJUST_MUTE, AudioManager.FLAG_SHOW_UI);
+                          return !m;
+                      } catch (Exception e) { return false; }
+                  }
+
+                  @JavascriptInterface
+                  public void openUrl(String url) { startIntent(new Intent(Intent.ACTION_VIEW, Uri.parse(url))); }
+
+                  @JavascriptInterface
+                  public void uninstall() {
+                      setHome(false);
+                      startIntent(new Intent(Intent.ACTION_DELETE, Uri.parse("package:" + getPackageName())));
+                  }
+
+                  @JavascriptInterface
+                  public boolean homeEnabled() {
+                      ComponentName alias = new ComponentName(MainActivity.this, "com.wisdom.home.HomeAlias");
+                      return getPackageManager().getComponentEnabledSetting(alias)
+                              == PackageManager.COMPONENT_ENABLED_STATE_ENABLED;
+                  }
+
+                  /** Turns Home mode on/off. On: Android asks which Home to use (choose "Just once" to test). */
+                  @JavascriptInterface
+                  public void setHome(boolean on) {
+                      ComponentName alias = new ComponentName(MainActivity.this, "com.wisdom.home.HomeAlias");
+                      getPackageManager().setComponentEnabledSetting(alias,
+                              on ? PackageManager.COMPONENT_ENABLED_STATE_ENABLED : PackageManager.COMPONENT_ENABLED_STATE_DISABLED,
+                              PackageManager.DONT_KILL_APP);
+                      if (on) startIntent(new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME));
+                  }
+
+                  @JavascriptInterface
+                  public String originalHome() {
+                      Intent h = new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME);
+                      for (ResolveInfo ri : getPackageManager().queryIntentActivities(h, 0)) {
+                          if (ri.activityInfo.packageName.equals(getPackageName())) continue;
+                          Intent i = new Intent(h);
+                          i.setComponent(new ComponentName(ri.activityInfo.packageName, ri.activityInfo.name));
+                          if (startIntent(i)) return "Opening " + ri.loadLabel(getPackageManager());
+                      }
+                      return "No other Home app found";
+                  }
+              }
+
+              // ---------- remote control ----------
+              private void sendWebKey(String key) {
+                  if (webView == null) return;
+                  String js = "document.dispatchEvent(new KeyboardEvent('keydown',{key:'" + key
+                          + "',bubbles:true,cancelable:true}));";
+                  webView.evaluateJavascript(js, null);
+              }
+
+              @Override
+              public boolean dispatchKeyEvent(KeyEvent event) {
+                  if (event.getAction() != KeyEvent.ACTION_DOWN) return super.dispatchKeyEvent(event);
+                  switch (event.getKeyCode()) {
+                      case KeyEvent.KEYCODE_DPAD_UP: sendWebKey("ArrowUp"); return true;
+                      case KeyEvent.KEYCODE_DPAD_DOWN: sendWebKey("ArrowDown"); return true;
+                      case KeyEvent.KEYCODE_DPAD_LEFT: sendWebKey("ArrowLeft"); return true;
+                      case KeyEvent.KEYCODE_DPAD_RIGHT: sendWebKey("ArrowRight"); return true;
+                      case KeyEvent.KEYCODE_DPAD_CENTER:
+                      case KeyEvent.KEYCODE_ENTER:
+                      case KeyEvent.KEYCODE_NUMPAD_ENTER:
+                          if (event.getRepeatCount() == 0) sendWebKey("Enter");
+                          return true;
+                      case KeyEvent.KEYCODE_MENU:
+                          if (event.getRepeatCount() == 0) sendWebKey("Menu");
+                          return true;
+                      case KeyEvent.KEYCODE_ESCAPE:
+                          if (event.getRepeatCount() == 0) sendWebKey("Escape");
+                          return true;
+                      default: return super.dispatchKeyEvent(event);
+                  }
+              }
+
+              @Override
+              public void onBackPressed() { sendWebKey("Escape"); }
+
+              @Override
+              public void onWindowFocusChanged(boolean hasFocus) {
+                  super.onWindowFocusChanged(hasFocus);
+                  if (hasFocus) enterImmersiveMode();
+              }
+
+              @Override
+              protected void onNewIntent(Intent intent) {
+                  super.onNewIntent(intent);
+                  sendWebKey("Escape"); // Home button pressed again: close panels
+              }
+
+              @Override
+              protected void onDestroy() {
+                  if (webView != null) {
+                      webView.loadUrl("about:blank");
+                      webView.stopLoading();
+                      webView.setWebChromeClient(null);
+                      webView.setWebViewClient(null);
+                      webView.destroy();
+                      webView = null;
+                  }
+                  super.onDestroy();
+              }
+          }
+          EOF_FILE_5
+          mkdir -p app/src/main/assets
+          cat > app/src/main/assets/index.html <<'EOF_FILE_6'
+          <!DOCTYPE html>
+          <html lang="en"><head><meta charset="utf-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+          <title>Wisdom Home Launcher</title>
+          <style>
+          :root{--bg:#0b1220;--bg2:#162033;--tile:#1a2438;--hi:#2ee6c5;--tx:#eef3f9;--mu:#8da0ba;--h1:#ff6b6b;--h2:#4361ee;color-scheme:dark;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+          body.sunset{--bg:#1c0f1f;--bg2:#2e1630;--tile:#3a1d3b;--hi:#ffb703;--h1:#ff5d8f;--h2:#fb8500}
+          body.forest{--bg:#0a1a14;--bg2:#12291f;--tile:#17352a;--hi:#9be564;--h1:#2a9d8f;--h2:#1b6b4a}
+          body.light{--bg:#eef2f7;--bg2:#dde5f0;--tile:#fff;--hi:#e63946;--tx:#16202e;--mu:#53637a;--h1:#4cc9f0;--h2:#4361ee;color-scheme:light}
+          *{box-sizing:border-box}
+          html,body{height:100%;margin:0;background:var(--bg);color:var(--tx);font-family:system-ui,Roboto,sans-serif;overflow:hidden}
+          #stage{position:fixed;left:50%;top:50%;width:1280px;height:720px;transform-origin:center;padding:36px 56px;display:flex;flex-direction:column;gap:20px;background:radial-gradient(900px 500px at 15% 0,var(--bg2),var(--bg))}
+          .top{display:flex;justify-content:space-between;align-items:center}
+          .brand{font-size:26px;font-weight:700}
+          #clk{font-size:36px;font-weight:600}#dt{color:var(--mu);font-size:18px;margin-left:12px}
+          .row{display:flex;gap:18px}
+          .t{background:var(--tile);border-radius:16px;display:flex;align-items:center;justify-content:center;gap:12px;font-size:19px;border:3px solid transparent;transition:transform .12s,border-color .12s;cursor:pointer;outline:none;color:var(--tx);position:relative}
+          .t:focus{border-color:var(--hi);transform:scale(1.06);z-index:2;box-shadow:0 8px 24px #0006}
+          .t.grab{border-style:dashed;transform:scale(1.1)}
+          .ic{width:34px;height:34px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round;flex:none}
+          .hero{width:500px;height:236px;background:linear-gradient(135deg,var(--h1),var(--h2));color:#fff;flex-direction:column;align-items:flex-start;justify-content:flex-end;padding:28px;gap:4px;font-size:34px;font-weight:700}
+          .hero small{font-size:18px;font-weight:400;opacity:.92}
+          .inputs{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;flex:1}
+          .inputs .t{justify-content:flex-start;padding-left:16px;font-size:17px}
+          h3{margin:4px 0 0;font-size:19px;color:var(--mu);font-weight:500}
+          .apps .t{width:196px;height:120px;flex-direction:column;gap:8px;font-size:18px}
+          .apps .ic{width:40px;height:40px}
+          .apps{flex-wrap:nowrap;overflow:visible}
+          #eb{display:none;gap:12px;align-items:center}
+          body.edit #eb{display:flex}
+          #eb .t{height:50px;padding:0 20px;font-size:17px}#eb .ic{width:22px;height:22px}
+          .hint{margin-top:auto;color:var(--mu);font-size:15px}
+          #pn{position:absolute;inset:0;background:#000b;display:none;align-items:center;justify-content:center}
+          #pn.o{display:flex}
+          .card{background:var(--bg2);border-radius:20px;padding:30px;width:560px;display:flex;flex-direction:column;gap:14px}
+          .card h2{margin:0 0 4px;font-size:24px}
+          .card .row .t{flex:1;height:70px;font-size:17px}
+          .sw{width:22px;height:22px;border-radius:50%;flex:none}
+          #toast{position:fixed;left:50%;bottom:16px;transform:translateX(-50%);background:var(--hi);color:#111;padding:8px 18px;border-radius:20px;font-weight:600;opacity:0;transition:opacity .2s;z-index:9;pointer-events:none}
+          #pad{position:fixed;right:10px;bottom:10px;display:grid;grid-template-columns:repeat(3,42px);gap:5px;z-index:8;opacity:.85}
+          #pad button{height:42px;border-radius:50%;border:0;background:#2b3b55;color:#fff;font-size:14px}
+          #pad button:active{background:var(--hi);color:#111}
+          .apps{overflow-x:auto;padding:12px 6px;margin:-12px 0;scrollbar-width:none}.apps::-webkit-scrollbar{display:none}.apps .t{flex:none}
+          .inputs .t{font-size:16px;gap:10px;padding-left:14px;white-space:nowrap}
+          html,body{user-select:none;-webkit-user-select:none;-webkit-tap-highlight-color:transparent;touch-action:manipulation;overscroll-behavior:none}
+          @media (hover:hover) and (pointer:fine){#pad{display:none}}
+          @media (prefers-reduced-motion:reduce){.t,#sk{transition:none}}
+          #in{user-select:text;-webkit-user-select:text}.inputs .ic{width:28px;height:28px}
+          #cd.big{width:920px;max-height:640px;overflow-y:auto}.grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}.grid3 .t{height:64px;font-size:16px;justify-content:flex-start;padding:0 14px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;display:flex}
+          .top .t{height:48px;padding:0 18px;font-size:16px;flex:none}.top .ic{width:22px;height:22px}
+          #dim,#warm{position:fixed;inset:0;pointer-events:none;z-index:15}#dim{background:#000;opacity:0}#warm{background:#ff9a3c;mix-blend-mode:multiply;opacity:0}
+          #ss{position:fixed;inset:0;background:#000;z-index:20;display:none;color:#fff}#ss.o{display:block}
+          #sk{position:absolute;transition:left 2s,top 2s;font-size:96px;font-weight:300;line-height:1}#sk small{display:block;font-size:22px;color:#8da0ba;margin-top:8px}
+          </style></head><body>
+          <svg width="0" height="0" style="position:absolute"><defs>
+          <symbol id="i-tv" viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="12" rx="2"/><path d="M8 21h8M12 17v4"/></symbol>
+          <symbol id="i-tvset" viewBox="0 0 24 24"><rect x="2" y="4" width="20" height="13" rx="2"/><path d="M8 21h8M12 17v4"/><circle cx="12" cy="10.5" r="2.5"/></symbol>
+          <symbol id="i-av" viewBox="0 0 24 24"><circle cx="7" cy="12" r="3"/><circle cx="17" cy="12" r="3"/><path d="M10 12h4"/></symbol>
+          <symbol id="i-hdmi" viewBox="0 0 24 24"><path d="M4 8h16v5l-3 4H7l-3-4z"/><path d="M9 12h6"/></symbol>
+          <symbol id="i-gear" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M5 5l2 2M17 17l2 2M19 5l-2 2M7 17l-2 2"/></symbol>
+          <symbol id="i-globe" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c3 3 3 15 0 18M12 3c-3 3-3 15 0 18"/></symbol>
+          <symbol id="i-bag" viewBox="0 0 24 24"><path d="M5 8h14l-1 12H6z"/><path d="M9 8a3 3 0 016 0"/></symbol>
+          <symbol id="i-tool" viewBox="0 0 24 24"><path d="M14 6a4 4 0 005 5l-9 9a2 2 0 01-3-3l9-9"/></symbol>
+          <symbol id="i-wifi" viewBox="0 0 24 24"><path d="M3 9a14 14 0 0118 0M6 12.5a9 9 0 0112 0M9 16a4 4 0 016 0"/><circle cx="12" cy="19" r="1"/></symbol>
+          <symbol id="i-grid" viewBox="0 0 24 24"><rect x="4" y="4" width="7" height="7" rx="1"/><rect x="13" y="4" width="7" height="7" rx="1"/><rect x="4" y="13" width="7" height="7" rx="1"/><rect x="13" y="13" width="7" height="7" rx="1"/></symbol>
+          <symbol id="i-play" viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="3"/><path d="M10 9l5 3-5 3z"/></symbol>
+          <symbol id="i-folder" viewBox="0 0 24 24"><path d="M3 7h6l2 2h10v10H3z"/></symbol>
+          <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+          <symbol id="i-edit" viewBox="0 0 24 24"><path d="M4 20l1-4 11-11 3 3L8 19z"/></symbol>
+          <symbol id="i-trash" viewBox="0 0 24 24"><path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13"/></symbol>
+          <symbol id="i-check" viewBox="0 0 24 24"><path d="M5 12l5 5 9-10"/></symbol>
+          <symbol id="i-palette" viewBox="0 0 24 24"><path d="M12 3a9 9 0 100 18c1.5 0 2-1 1.5-2s0-2 1.5-2h2a3 3 0 003-3c0-6-4-11-8-11z"/></symbol>
+          </defs></svg>
+          <div id="stage">
+           <div class="top"><div class="brand">Wisdom Home</div><div style="display:flex;align-items:center;gap:22px"><div><span id="clk"></span><span id="dt"></span></div><div class="t" tabindex="0" data-n="Launcher settings"><svg class="ic"><use href="#i-gear"/></svg>Launcher</div></div></div>
+           <div class="row" style="gap:20px">
+            <div class="t hero" tabindex="0" data-n="Live TV"><span>Wisdom Share</span><small>Smart cloud TV · press OK for Live TV</small></div>
+            <div class="inputs" id="inp"></div>
+           </div>
+           <h3>Favourite apps</h3>
+           <div class="row apps" id="fav"></div>
+           <div id="eb"></div>
+           <div class="hint" id="hint">Arrows move · OK opens · Menu opens settings</div>
+           <div id="pn"><div class="card" id="cd"></div></div>
+          </div>
+          <div id="toast"></div><div id="dim"></div><div id="warm"></div><div id="ss"><div id="sk"><span></span><small></small></div></div>
+          <div id="pad">
+           <button data-k="Menu">≡</button><button data-k="ArrowUp">▲</button><button data-k="Escape">⟲</button>
+           <button data-k="ArrowLeft">◀</button><button data-k="Enter">OK</button><button data-k="ArrowRight">▶</button>
+           <span></span><button data-k="ArrowDown">▼</button><span></span>
+          </div>
+          <script>
+          const $=id=>document.getElementById(id),st=$('stage');
+          const ic=n=>'<svg class="ic"><use href="#i-'+n+'"/></svg>';
+          const esc=s=>String(s).replace(/[&<>"']/g,c=>'&#'+c.charCodeAt(0)+';');
+          const HAS=!!window.Android;const J=f=>{try{return JSON.parse(f)}catch(e){return[]}};
+          const INP=[['ATV','tv'],['AV 1','av'],['AV 2','av'],['HDMI 1','hdmi'],['HDMI 2','hdmi'],['TV Settings','tvset'],['Browser','globe'],['App Store','bag'],['TV Assistant','tool'],['Network','wifi'],['Games','grid']];
+          const ICS=['grid','play','folder','globe','bag','tool','tv'];
+          const LINKS={Browser:'https://www.google.com',YouTube:'https://m.youtube.com','App Store':'https://play.google.com/store/apps'};
+          let favs=[{n:'Apps',i:'grid'},{n:'Media',i:'play'},{n:'YouTube',i:'play'},{n:'Files',i:'folder'}],theme='',edit=false,grab=null,wp='',qs={b:100,v:50,wifi:true,bt:false,night:false,mute:false};
+          try{const s=JSON.parse(localStorage.getItem('wh')||'null');if(s){favs=s.f||favs;theme=s.t||'';wp=s.w||'';qs=Object.assign(qs,s.q||{})}}catch(e){}
+          function save(){try{localStorage.setItem('wh',JSON.stringify({f:favs,t:theme,w:wp,q:qs}))}catch(e){}}
+          function fit(){const s=Math.min(innerWidth/1280,innerHeight/720);st.style.transform='translate(-50%,-50%) scale('+s+')'}
+          addEventListener('resize',fit);fit();
+          function clock(){const d=new Date();$('clk').textContent=d.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'});$('dt').textContent=d.toLocaleDateString([], {weekday:'short',day:'numeric',month:'short'})}
+          clock();setInterval(clock,20000);
+          function say(m){const t=$('toast');t.textContent=m;t.style.opacity=1;clearTimeout(say.h);say.h=setTimeout(()=>t.style.opacity=0,1400)}
+          function applyTheme(){document.body.className=theme+(edit?' edit':'')}
+          function render(f){
+           $('inp').innerHTML=INP.map(a=>'<div class="t" tabindex="0" data-n="'+a[0]+'">'+ic(a[1])+a[0]+'</div>').join('');
+           $('fav').innerHTML=favs.map((a,k)=>'<div class="t" tabindex="0" data-f="'+k+'" data-n="'+esc(a.n)+'">'+ic(a.i)+esc(a.n)+'</div>').join('')+'<div class="t" tabindex="0" data-add="1" data-n="Add app">'+ic('plus')+'Add app</div>';
+           $('eb').innerHTML='<div class="t" tabindex="0" data-a="ren">'+ic('edit')+'Rename</div><div class="t" tabindex="0" data-a="del">'+ic('trash')+'Remove</div><div class="t" tabindex="0" data-a="done">'+ic('check')+'Done</div>';
+           applyTheme();
+           if(f!=null){const e=document.querySelector('[data-f="'+f+'"]');e&&e.focus()}
+          }
+          let lastT=null;document.addEventListener('focusin',e=>{if(e.target.classList&&e.target.classList.contains('t'))lastT=e.target});
+          function cur(){const a=document.activeElement;if(a&&a.tagName=='INPUT')return null;if(a&&a.classList.contains('t'))return a;return lastT&&lastT.isConnected&&lastT.offsetParent?lastT:null}
+          function scope(){return [...($('pn').classList.contains('o')?$('cd'):st).querySelectorAll('.t')].filter(e=>e.offsetParent)}
+          function move(k){
+           const L=scope(),c=cur()&&L.includes(cur())?cur():L[0];if(!c)return;
+           if(grab!=null){if(c.dataset.f==null||!(k=='ArrowLeft'||k=='ArrowRight'))return;
+            const i=+c.dataset.f,j=k=='ArrowLeft'?i-1:i+1;if(j<0||j>=favs.length)return;
+            [favs[i],favs[j]]=[favs[j],favs[i]];grab=j;save();render(j);document.querySelector('[data-f="'+j+'"]').classList.add('grab');return}
+           const r=c.getBoundingClientRect(),cx=r.left+r.width/2,cy=r.top+r.height/2;let b=null,bd=1e9;
+           L.forEach(e=>{if(e===c)return;const q=e.getBoundingClientRect(),x=q.left+q.width/2-cx,y=q.top+q.height/2-cy,H=k=='ArrowLeft'||k=='ArrowRight';
+            const ok=k=='ArrowRight'?x>10&&Math.abs(y)<Math.abs(x)+60:k=='ArrowLeft'?x<-10&&Math.abs(y)<Math.abs(x)+60:k=='ArrowDown'?y>10&&Math.abs(x)<Math.abs(y)*1.5+160:y<-10&&Math.abs(x)<Math.abs(y)*1.5+160;
+            if(!ok)return;const d=H?Math.abs(x)+Math.abs(y)*2:Math.abs(y)+Math.abs(x)*2;if(d<bd){bd=d;b=e}});
+           if(b)b.focus()}
+          function panel(){
+           const th=[['','Midnight','#2ee6c5'],['sunset','Sunset','#ffb703'],['forest','Forest','#9be564'],['light','Light','#e63946']];
+           $('cd').innerHTML='<h2>Settings</h2><div class="row">'+th.map(a=>'<div class="t" tabindex="0" data-th="'+a[0]+'"><span class="sw" style="background:'+a[2]+'"></span>'+a[1]+'</div>').join('')+'</div><div class="row"><div class="t" tabindex="0" data-p="wp">'+ic('palette')+'Wallpaper</div><div class="t" tabindex="0" data-p="qs">'+ic('gear')+'Quick settings</div></div>'+(HAS?'<div class="row"><div class="t" tabindex="0" data-p="home">'+ic('tv')+'Home mode: '+(Android.homeEnabled()?'On':'Off')+'</div><div class="t" tabindex="0" data-p="orig">'+ic('tv')+'Original home</div><div class="t" tabindex="0" data-p="uninstall">'+ic('trash')+'Uninstall</div></div>':'')+'<div class="row"><div class="t" tabindex="0" data-p="edit">'+ic('edit')+'Edit apps</div><div class="t" tabindex="0" data-p="reset">'+ic('trash')+'Reset</div><div class="t" tabindex="0" data-p="close">'+ic('check')+'Close</div></div>';
+           $('pn').classList.add('o');$('cd').querySelector('.t').focus()}
+          function closeP(){stopSnake();$('cd').className='card';$('pn').classList.remove('o');const e=document.querySelector('[data-n="Launcher settings"]');e&&e.focus()}
+          function ok(){
+           if(dlg&&!cur()){submit();return}const c=cur();if(!c)return;const d=c.dataset;if(d.dlg=='ok'){submit();return}if(d.dlg=='no'){cancel();return}
+           if(d.th!=null){theme=d.th;save();applyTheme();say('Theme changed');return}
+           if(d.p=='close'){closeP();return}if(d.p=='reset'){if(!rs){rs=1;say('Press OK again to reset');setTimeout(()=>rs=0,4000);return}rs=0;resetAll();return}if(d.p=='wp'){wpPanel();return}if(d.p=='qs'){qsPanel();return}if(d.w!=null){wp=d.w;save();applyWp();say('Wallpaper changed');return}if(d.q){qAct(d.q);return}if(d.g){game(d.g);return}if(d.c!=null){tttMove(+d.c);return}if(d.pk){if(d.m=='add'){favs.push({n:d.pn,i:'grid',p:d.pk});save();closeP();render(favs.length-1)}else{Android.launch(d.pk);closeP()}return}if(d.p=='uninstall'){Android.uninstall();return}if(d.p=='orig'){say(Android.originalHome());return}if(d.p=='home'){Android.setHome(!Android.homeEnabled());say(Android.homeEnabled()?'Home mode on. Choose Just once while testing':'Home mode off');panel();return}
+           if(d.p=='edit'){edit=true;applyTheme();closeP();document.querySelector('[data-f="0"]').focus();$('hint').textContent='Edit mode: OK grabs an app, then ◀ ▶ moves it';return}
+           if(d.a=='done'){exitEdit();say('Saved');return}
+           if(d.a){act(d.a,lastF);return}
+           if(d.add&&HAS){appsPanel('add');return}if(d.add){ask('App name','',n=>{favs.push({n:n,i:ICS[favs.length%ICS.length]});save();render(favs.length-1)});return}
+           if(d.f!=null&&edit){lastF=+d.f;if(grab==null){grab=+d.f;c.classList.add('grab');say('Grabbed: use ◀ ▶')}else{grab=null;c.classList.remove('grab');say('Dropped')}return}
+           if(d.n==='Launcher settings'){panel();return}if(d.n==='Games'){gPanel();return}if(HAS&&native(c)){return}
+           const u=LINKS[d.n];say(u?'Opening '+d.n:d.n==='TV Settings'?'In the APK this opens the TV\'s own settings':d.n+': available in the real APK');if(u){try{if(!window.open(u,'_blank'))say('Popup blocked, could not open the link')}catch(e){}}}
+          let lastF=0;
+          function act(a,k){if(!favs[k])return;
+           if(a=='ren'){ask('New name',favs[k].n,n=>{favs[k].n=n;save();render(k)})}
+           if(a=='del'){favs.splice(k,1);save();grab=null;lastF=0;render(favs.length?Math.max(0,k-1):null);if(!favs.length)document.querySelector('[data-add]').focus()}}
+          let dlg=null;
+          function ask(t,v,cb){dlg=cb;$('cd').innerHTML='<h2>'+t+'</h2><input id="in" maxlength="20" style="font-size:22px;padding:12px;border-radius:12px;border:2px solid var(--hi);background:var(--tile);color:var(--tx)"><div class="row"><div class="t" tabindex="0" data-dlg="ok">'+ic('check')+'Save</div><div class="t" tabindex="0" data-dlg="no">Cancel</div></div>';$('in').value=v;$('pn').classList.add('o');$('in').focus()}
+          function submit(){const n=$('in')?$('in').value.trim():'';const cb=dlg;dlg=null;$('pn').classList.remove('o');if(n&&cb)cb(n)}
+          function cancel(){dlg=null;$('pn').classList.remove('o');const e=document.querySelector('.t');e&&e.focus()}
+          function exitEdit(){edit=false;grab=null;render();$('hint').textContent='Arrows move · OK opens · Menu opens settings';(document.querySelector('[data-f="0"]')||document.querySelector('.hero')).focus()}
+          function key(k){if(snk&&!snk.over&&k.startsWith('Arrow')){sdir(k);return}
+           if(k=='Enter')ok();else if(k=='Menu'){if(!dlg){$('pn').classList.contains('o')?closeP():panel()}}
+           else if(k=='Escape'){if(dlg)cancel();else if($('pn').classList.contains('o'))closeP();else if(edit)exitEdit()}
+           else{const c=cur();if(c&&c.dataset.f!=null)lastF=+c.dataset.f;move(k)}}
+          addEventListener('keydown',e=>{if(e.target.tagName=='INPUT'){if(e.key=='Enter'){e.preventDefault();submit()}else if(e.key=='Escape')cancel();else if(e.key=='ArrowDown'){e.preventDefault();document.querySelector('[data-dlg="ok"]').focus()}return}const m={ContextMenu:'Menu',F1:'Menu',m:'Menu',Backspace:'Escape'}[e.key]||e.key;if(m.startsWith('Arrow')||['Enter','Menu','Escape'].includes(m)){e.preventDefault();key(m)}});
+          document.querySelectorAll('#pad button').forEach(b=>{b.tabIndex=-1;['mousedown','pointerdown'].forEach(ev=>b.addEventListener(ev,e=>e.preventDefault()));b.addEventListener('click',()=>key(b.dataset.k))});
+          st.addEventListener('click',e=>{const t=e.target.closest('.t');if(t){t.focus();ok()}});
+          const WP={'':['Default',''],aur:['Aurora','linear-gradient(160deg,#0f2027,#203a43,#2c5364)'],dusk:['Dusk','linear-gradient(160deg,#41295a,#2f0743)'],ember:['Ember','radial-gradient(900px 500px at 85% 0,#ff7e5f66,transparent),#1b1020'],mint:['Mint','linear-gradient(160deg,#134e5e,#71b280)'],ink:['Ink','#000']};
+          function native(c){const d=c.dataset,n=d.n;
+           if(d.f!=null){const f=favs[+d.f];if(f&&f.p){Android.launch(f.p);return true}}
+           if(n=='Apps'){appsPanel('launch');return true}
+           const S={'TV Settings':'tv','Network':'network'};if(S[n]){Android.settings(S[n]);return true}
+           if(/^(HDMI|AV|ATV)/.test(n)){say(Android.input(n));return true}
+           if(n=='Live TV'){say(Android.input('ATV'));return true}
+           if(['Browser','YouTube','App Store','Media','Files','TV Assistant'].includes(n)){if(Android.launchLabel(n))return true;if(LINKS[n]){Android.openUrl(LINKS[n]);return true}say(n+' is not installed on this TV');return true}
+           return false}
+          function appsPanel(mode){const L=J(Android.apps());$('cd').className='card big';
+           $('cd').innerHTML='<h2>'+(mode=='add'?'Add favourite app':'All apps')+' ('+L.length+')</h2><div class="grid3">'+L.map(a=>'<div class="t" tabindex="0" data-pk="'+esc(a.p)+'" data-pn="'+esc(a.n)+'" data-m="'+mode+'">'+esc(a.n)+'</div>').join('')+'</div><div class="row"><div class="t" tabindex="0" data-p="close">'+ic('check')+'Close</div></div>';openP()}
+          function applyWp(){st.style.background=(WP[wp]||WP[''])[1]}
+          function applyQ(){$('dim').style.opacity=(100-qs.b)/100*0.85;$('warm').style.opacity=qs.night?0.35:0}
+          function openP(){$('pn').classList.add('o');const e=$('cd').querySelector('.t');e&&e.focus()}
+          function wpPanel(){const k=Object.keys(WP);let h='<h2>Wallpaper</h2>';for(let i=0;i<k.length;i+=3)h+='<div class="row">'+k.slice(i,i+3).map(x=>'<div class="t" tabindex="0" data-w="'+x+'"><span class="sw" style="background:'+(WP[x][1]||'var(--bg2)')+';border:1px solid var(--mu)"></span>'+WP[x][0]+'</div>').join('')+'</div>';$('cd').innerHTML=h+'<div class="row"><div class="t" tabindex="0" data-p="close">'+ic('check')+'Close</div></div>';openP()}
+          function qsPanel(f){const R=(q,l)=>'<div class="t" tabindex="0" data-q="'+q+'">'+l+'</div>',o=v=>v?'On':'Off';
+           $('cd').innerHTML='<h2>Quick settings</h2><div class="row">'+R('b-','Brightness − '+qs.b+'%')+R('b+','Brightness +')+'</div><div class="row">'+R('v-','Volume − '+qs.v+'%')+R('v+','Volume +')+'</div><div class="row">'+R('wifi','Wi-Fi settings')+R('bt','Bluetooth settings')+'</div><div class="row">'+R('night','Night light: '+o(qs.night))+R('mute','Mute: '+o(qs.mute))+'</div><div style="color:var(--mu);font-size:14px">Brightness and night light work here. Wi-Fi, Bluetooth and volume open the TV\'s own controls in the real APK.</div><div class="row"><div class="t" tabindex="0" data-p="close">'+ic('check')+'Close</div></div>';
+           $('pn').classList.add('o');const e=$('cd').querySelector('[data-q="'+f+'"]')||$('cd').querySelector('.t');e.focus()}
+          function qAct(q){const c=(v,a,b)=>Math.max(a,Math.min(b,v));
+           if(HAS&&(q=='v-'||q=='v+'))qs.v=Android.volume(q=='v+'?1:-1);else if(HAS&&q=='mute')qs.mute=Android.mute();else if(q=='b-')qs.b=c(qs.b-10,10,100);else if(q=='b+')qs.b=c(qs.b+10,10,100);else if(q=='v-')qs.v=c(qs.v-10,0,100);else if(q=='v+')qs.v=c(qs.v+10,0,100);else if(q=='wifi'||q=='bt'){if(HAS){Android.settings(q);return}say('In the APK this opens the TV\'s '+(q=='wifi'?'Wi-Fi':'Bluetooth')+' settings');return}else qs[q]=!qs[q];
+           save();applyQ();qsPanel(q)}
+          function gPanel(){$('cd').innerHTML='<h2>Games</h2><div class="row"><div class="t" tabindex="0" data-g="ttt">Tic-Tac-Toe</div><div class="t" tabindex="0" data-g="snake">Snake</div></div><div class="row"><div class="t" tabindex="0" data-p="close">'+ic('check')+'Close</div></div>';openP()}
+          function game(g){if(g=='ttt')tttPanel();else snakePanel()}
+          let tb=[],tm='';const WL=[[0,1,2],[3,4,5],[6,7,8],[0,3,6],[1,4,7],[2,5,8],[0,4,8],[2,4,6]];
+          function tw(b){for(const l of WL)if(b[l[0]]&&b[l[0]]==b[l[1]]&&b[l[1]]==b[l[2]])return b[l[0]];return b.every(Boolean)?'D':''}
+          function tttPanel(){tb=Array(9).fill('');tm='Your turn (X)';tttDraw(4)}
+          function tttDraw(f){$('cd').innerHTML='<h2>Tic-Tac-Toe</h2><div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px">'+tb.map((v,i)=>'<div class="t" tabindex="0" data-c="'+i+'" style="height:80px;font-size:44px;font-weight:700">'+v+'</div>').join('')+'</div><div style="color:var(--mu)">'+tm+'</div><div class="row"><div class="t" tabindex="0" data-g="ttt">New game</div><div class="t" tabindex="0" data-p="close">Close</div></div>';$('pn').classList.add('o');const e=$('cd').querySelector('[data-c="'+f+'"]');e&&e.focus()}
+          function tttMove(i){if(tb[i]||tw(tb))return;tb[i]='X';let r=tw(tb);
+           if(!r){const fr=tb.map((v,k)=>v?-1:k).filter(k=>k>=0),tr=p=>{for(const k of fr){const c=tb.slice();c[k]=p;if(tw(c)==p)return k}return -1};
+            let m=tr('O');if(m<0)m=tr('X');if(m<0&&!tb[4])m=4;if(m<0)m=fr[Math.floor(Math.random()*fr.length)];tb[m]='O';r=tw(tb)}
+           tm=r=='X'?'You win!':r=='O'?'Computer wins':r=='D'?'Draw':'Your turn (X)';tttDraw(i)}
+          let rs=0;function resetAll(){try{localStorage.removeItem('wh')}catch(e){}favs=[{n:'Apps',i:'grid'},{n:'Media',i:'play'},{n:'YouTube',i:'play'},{n:'Files',i:'folder'}];theme='';wp='';qs={b:100,v:50,wifi:true,bt:false,night:false,mute:false};edit=false;grab=null;applyWp();applyQ();render();closeP();say('Launcher has been reset')}
+          let snk=null;
+          function stopSnake(){if(snk){clearInterval(snk.t);snk=null}}
+          function snakePanel(){stopSnake();$('cd').innerHTML='<h2>Snake</h2><canvas id="cv" width="400" height="300" style="width:100%;border-radius:12px;background:#0008"></canvas><div id="sc" style="color:var(--mu)">Use the arrow keys</div><div class="row"><div class="t" tabindex="0" data-g="snake">Restart</div><div class="t" tabindex="0" data-p="close">Close</div></div>';openP();
+           snk={s:[[10,7],[9,7],[8,7]],d:[1,0],n:[1,0],f:[15,7],p:0,over:false};snk.t=setInterval(stepSnake,140)}
+          function sdir(k){const m={ArrowUp:[0,-1],ArrowDown:[0,1],ArrowLeft:[-1,0],ArrowRight:[1,0]}[k];if(m[0]!==-snk.d[0]||m[1]!==-snk.d[1])snk.n=m}
+          function stepSnake(){if(!snk||!$('cv')){stopSnake();return}const g=snk;g.d=g.n;const h=[g.s[0][0]+g.d[0],g.s[0][1]+g.d[1]];
+           if(h[0]<0||h[1]<0||h[0]>=20||h[1]>=15||g.s.some(c=>c[0]==h[0]&&c[1]==h[1])){g.over=true;clearInterval(g.t);$('sc').textContent='Game over · Score '+g.p;return}
+           g.s.unshift(h);if(h[0]==g.f[0]&&h[1]==g.f[1]){g.p++;do{g.f=[Math.floor(Math.random()*20),Math.floor(Math.random()*15)]}while(g.s.some(c=>c[0]==g.f[0]&&c[1]==g.f[1]));$('sc').textContent='Score '+g.p}else g.s.pop();
+           const x=$('cv').getContext('2d');x.clearRect(0,0,400,300);x.fillStyle='#ff4d4d';x.fillRect(g.f[0]*20+3,g.f[1]*20+3,14,14);x.fillStyle=getComputedStyle(document.body).getPropertyValue('--hi')||'#2ee6c5';g.s.forEach(c=>x.fillRect(c[0]*20+1,c[1]*20+1,18,18))}
+          const ss=$('ss');let idle;
+          function ssMove(){const c=$('sk');c.style.left=Math.random()*55+'%';c.style.top=Math.random()*65+'%';const d=new Date();c.children[0].textContent=d.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'});c.children[1].textContent=d.toLocaleDateString([], {weekday:'long',day:'numeric',month:'long'})}
+          function wake(){clearTimeout(idle);idle=setTimeout(()=>{ss.classList.add('o');ssMove()},60000)}
+          ['keydown','pointerdown'].forEach(ev=>addEventListener(ev,e=>{if(ss.classList.contains('o')){ss.classList.remove('o');ss._w=Date.now();e.stopPropagation();e.preventDefault()}wake()},true));addEventListener('click',e=>{if(Date.now()-(ss._w||0)<500){e.stopPropagation();e.preventDefault()}},true);
+          setInterval(()=>{if(ss.classList.contains('o'))ssMove()},8000);
+          render();document.querySelector('.hero').focus();if(HAS){try{qs.v=Android.volume(0);qs.mute=Android.isMuted()}catch(e){}}applyWp();applyQ();wake();
+          </script></body></html>
+          EOF_FILE_6
+      - name: Build APK
+        run: gradle assembleDebug --no-daemon
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wisdom-home-apk
+          path: app/build/outputs/apk/debug/app-debug.apk
