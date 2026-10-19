@@ -46,8 +46,16 @@ jobs:
                   applicationId 'com.wisdom.home'
                   minSdk 23
                   targetSdk 28
-                  versionCode 1
-                  versionName '1.1'
+                  versionCode 2
+                  versionName '1.2'
+              }
+              signingConfigs {
+                  debug {
+                      storeFile file('../wisdom.keystore')
+                      storePassword 'wisdom123'
+                      keyAlias 'wisdom'
+                      keyPassword 'wisdom123'
+                  }
               }
               compileOptions {
                   sourceCompatibility JavaVersion.VERSION_1_8
@@ -68,6 +76,7 @@ jobs:
               <uses-permission android:name="android.permission.INTERNET" />
               <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />
               <uses-permission android:name="android.permission.REQUEST_DELETE_PACKAGES" />
+              <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
               <application
                   android:allowBackup="false"
                   android:label="Wisdom Home"
@@ -87,6 +96,12 @@ jobs:
                           <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
                       </intent-filter>
                   </activity>
+                  <receiver android:name=".BootReceiver" android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.BOOT_COMPLETED" />
+                          <action android:name="android.intent.action.QUICKBOOT_POWERON" />
+                      </intent-filter>
+                  </receiver>
                   <!-- Disabled by default. Enabled from Launcher settings > Home mode. -->
                   <activity-alias
                       android:name=".HomeAlias"
@@ -112,12 +127,15 @@ jobs:
           import android.content.Intent;
           import android.content.pm.PackageManager;
           import android.content.pm.ResolveInfo;
+          import android.graphics.Bitmap;
+          import android.graphics.BitmapFactory;
           import android.graphics.Color;
           import android.media.AudioManager;
           import android.media.tv.TvContract;
           import android.media.tv.TvInputInfo;
           import android.media.tv.TvInputManager;
           import android.net.Uri;
+          import android.util.Base64;
           import android.os.Bundle;
           import android.provider.Settings;
           import android.view.KeyEvent;
@@ -132,6 +150,10 @@ jobs:
           import android.widget.Toast;
           import org.json.JSONArray;
           import org.json.JSONObject;
+          import java.io.File;
+          import java.io.FileInputStream;
+          import java.io.FileOutputStream;
+          import java.io.InputStream;
           import java.util.ArrayList;
           import java.util.Collections;
           import java.util.Comparator;
@@ -382,6 +404,67 @@ jobs:
                   }
 
                   @JavascriptInterface
+                  public void pickImage() {
+                      runOnUiThread(new Runnable() {
+                          @Override public void run() {
+                              try {
+                                  Intent i = new Intent(Intent.ACTION_GET_CONTENT);
+                                  i.setType("image/*");
+                                  i.addCategory(Intent.CATEGORY_OPENABLE);
+                                  startActivityForResult(i, REQ_IMAGE);
+                              } catch (Exception e) { toast("No file picker found on this TV"); }
+                          }
+                      });
+                  }
+
+                  @JavascriptInterface
+                  public boolean hasWallpaper() { return wallpaperFile().exists(); }
+
+                  @JavascriptInterface
+                  public String wallpaperData() {
+                      try {
+                          File f = wallpaperFile();
+                          byte[] b = new byte[(int) f.length()];
+                          FileInputStream in = new FileInputStream(f);
+                          int n = 0;
+                          while (n < b.length) {
+                              int r = in.read(b, n, b.length - n);
+                              if (r < 0) break;
+                              n += r;
+                          }
+                          in.close();
+                          return "data:image/jpeg;base64," + Base64.encodeToString(b, Base64.NO_WRAP);
+                      } catch (Exception e) { return ""; }
+                  }
+
+                  @JavascriptInterface
+                  public boolean bootEnabled() {
+                      return getSharedPreferences("wh", MODE_PRIVATE).getBoolean("boot", true);
+                  }
+
+                  @JavascriptInterface
+                  public void setBoot(boolean on) {
+                      getSharedPreferences("wh", MODE_PRIVATE).edit().putBoolean("boot", on).apply();
+                  }
+
+                  /** Opens Android's "default Home app" screen; falls back to the stock launcher's app info. */
+                  @JavascriptInterface
+                  public void homeSettings() {
+                      try {
+                          startActivity(new Intent(Settings.ACTION_HOME_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+                          return;
+                      } catch (Exception ignored) { }
+                      Intent h = new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME);
+                      for (ResolveInfo ri : getPackageManager().queryIntentActivities(h, 0)) {
+                          if (ri.activityInfo.packageName.equals(getPackageName())) continue;
+                          startIntent(new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                                  Uri.parse("package:" + ri.activityInfo.packageName)));
+                          return;
+                      }
+                      startIntent(new Intent(Settings.ACTION_SETTINGS));
+                  }
+
+                  @JavascriptInterface
                   public String originalHome() {
                       Intent h = new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME);
                       for (ResolveInfo ri : getPackageManager().queryIntentActivities(h, 0)) {
@@ -392,6 +475,57 @@ jobs:
                       }
                       return "No other Home app found";
                   }
+              }
+
+              private static final int REQ_IMAGE = 41;
+
+              private File wallpaperFile() { return new File(getFilesDir(), "wallpaper.jpg"); }
+
+              /** Result of the image picker: shrink the picture and keep it as the launcher wallpaper. */
+              @Override
+              protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+                  super.onActivityResult(requestCode, resultCode, data);
+                  if (requestCode != REQ_IMAGE || resultCode != RESULT_OK || data == null || data.getData() == null) return;
+                  final Uri uri = data.getData();
+                  new Thread(new Runnable() {
+                      @Override public void run() {
+                          try {
+                              BitmapFactory.Options o = new BitmapFactory.Options();
+                              o.inJustDecodeBounds = true;
+                              InputStream in = getContentResolver().openInputStream(uri);
+                              BitmapFactory.decodeStream(in, null, o);
+                              if (in != null) in.close();
+                              int s = 1;
+                              while (o.outWidth / (s * 2) >= 1280 && o.outHeight / (s * 2) >= 720) s *= 2;
+                              BitmapFactory.Options o2 = new BitmapFactory.Options();
+                              o2.inSampleSize = s;
+                              o2.inPreferredConfig = Bitmap.Config.RGB_565;
+                              in = getContentResolver().openInputStream(uri);
+                              Bitmap bmp = BitmapFactory.decodeStream(in, null, o2);
+                              if (in != null) in.close();
+                              if (bmp == null) { toast("Could not read this image"); return; }
+                              int w = bmp.getWidth(), h = bmp.getHeight(), max = 1600;
+                              if (w > max || h > max) {
+                                  float f = (float) max / Math.max(w, h);
+                                  Bitmap sc = Bitmap.createScaledBitmap(bmp, Math.round(w * f), Math.round(h * f), true);
+                                  bmp.recycle();
+                                  bmp = sc;
+                              }
+                              FileOutputStream out = new FileOutputStream(wallpaperFile());
+                              bmp.compress(Bitmap.CompressFormat.JPEG, 82, out);
+                              out.close();
+                              bmp.recycle();
+                              runOnUiThread(new Runnable() {
+                                  @Override public void run() {
+                                      if (webView != null) webView.evaluateJavascript(
+                                              "window.onWallpaperPicked&&window.onWallpaperPicked()", null);
+                                  }
+                              });
+                          } catch (Throwable e) {
+                              toast("Could not use this image");
+                          }
+                      }
+                  }).start();
               }
 
               // ---------- remote control ----------
@@ -454,8 +588,33 @@ jobs:
               }
           }
           EOF_FILE_5
+          mkdir -p app/src/main/java/com/wisdom/home
+          cat > app/src/main/java/com/wisdom/home/BootReceiver.java <<'EOF_FILE_6'
+          package com.wisdom.home;
+
+          import android.content.BroadcastReceiver;
+          import android.content.Context;
+          import android.content.Intent;
+
+          /** Opens Wisdom Home after the TV finishes booting (can be switched off in Launcher settings). */
+          public class BootReceiver extends BroadcastReceiver {
+              @Override
+              public void onReceive(Context c, Intent i) {
+                  String a = i.getAction();
+                  if (Intent.ACTION_BOOT_COMPLETED.equals(a) || "android.intent.action.QUICKBOOT_POWERON".equals(a)) {
+                      if (c.getSharedPreferences("wh", Context.MODE_PRIVATE).getBoolean("boot", true)) {
+                          try {
+                              Intent s = new Intent(c, MainActivity.class);
+                              s.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                              c.startActivity(s);
+                          } catch (Exception ignored) { }
+                      }
+                  }
+              }
+          }
+          EOF_FILE_6
           mkdir -p app/src/main/assets
-          cat > app/src/main/assets/index.html <<'EOF_FILE_6'
+          cat > app/src/main/assets/index.html <<'EOF_FILE_7'
           <!DOCTYPE html>
           <html lang="en"><head><meta charset="utf-8">
           <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
@@ -467,47 +626,57 @@ jobs:
           body.light{--bg:#eef2f7;--bg2:#dde5f0;--tile:#fff;--hi:#e63946;--tx:#16202e;--mu:#53637a;--h1:#4cc9f0;--h2:#4361ee;color-scheme:light}
           *{box-sizing:border-box}
           html,body{height:100%;margin:0;background:var(--bg);color:var(--tx);font-family:system-ui,Roboto,sans-serif;overflow:hidden}
-          #stage{position:fixed;left:50%;top:50%;width:1280px;height:720px;transform-origin:center;padding:36px 56px;display:flex;flex-direction:column;gap:20px;background:radial-gradient(900px 500px at 15% 0,var(--bg2),var(--bg))}
+          #stage{position:fixed;left:50%;top:50%;width:1280px;height:720px;transform-origin:center;padding:36px 56px;display:flex;flex-direction:column;background:radial-gradient(900px 500px at 15% 0,var(--bg2),var(--bg))}
           .top{display:flex;justify-content:space-between;align-items:center}
           .brand{font-size:26px;font-weight:700}
           #clk{font-size:36px;font-weight:600}#dt{color:var(--mu);font-size:18px;margin-left:12px}
-          .row{display:flex;gap:18px}
-          .t{background:var(--tile);border-radius:16px;display:flex;align-items:center;justify-content:center;gap:12px;font-size:19px;border:3px solid transparent;transition:transform .12s,border-color .12s;cursor:pointer;outline:none;color:var(--tx);position:relative}
+          .row{display:flex}
+          #stage>*+*{margin-top:18px}
+          #pn{margin:0!important}
+          .row>*+*{margin-left:18px}
+          .card>*+*{margin-top:14px}
+          #eb>*+*{margin-left:12px}
+          .ic{margin-right:10px}
+          .apps .ic{margin:0 0 8px}
+          .top .t{margin-left:22px}
+          .hero small{margin-top:4px}
+          .sw{margin-right:10px}
+          .t{background:var(--tile);border-radius:16px;display:flex;align-items:center;justify-content:center;font-size:19px;border:3px solid transparent;transition:transform .12s,border-color .12s;cursor:pointer;outline:none;color:var(--tx);position:relative}
           .t:focus{border-color:var(--hi);transform:scale(1.06);z-index:2;box-shadow:0 8px 24px #0006}
           .t.grab{border-style:dashed;transform:scale(1.1)}
           .ic{width:34px;height:34px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round;flex:none}
-          .hero{width:500px;height:236px;background:linear-gradient(135deg,var(--h1),var(--h2));color:#fff;flex-direction:column;align-items:flex-start;justify-content:flex-end;padding:28px;gap:4px;font-size:34px;font-weight:700}
+          .hero{width:500px;height:236px;background:linear-gradient(135deg,var(--h1),var(--h2));color:#fff;flex-direction:column;align-items:flex-start;justify-content:flex-end;padding:28px;font-size:34px;font-weight:700}
           .hero small{font-size:18px;font-weight:400;opacity:.92}
           .inputs{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;flex:1}
           .inputs .t{justify-content:flex-start;padding-left:16px;font-size:17px}
           h3{margin:4px 0 0;font-size:19px;color:var(--mu);font-weight:500}
-          .apps .t{width:196px;height:120px;flex-direction:column;gap:8px;font-size:18px}
+          .apps .t{width:196px;height:120px;flex-direction:column;font-size:18px}
           .apps .ic{width:40px;height:40px}
           .apps{flex-wrap:nowrap;overflow:visible}
-          #eb{display:none;gap:12px;align-items:center}
+          #eb{display:none;align-items:center}
           body.edit #eb{display:flex}
           #eb .t{height:50px;padding:0 20px;font-size:17px}#eb .ic{width:22px;height:22px}
           .hint{margin-top:auto;color:var(--mu);font-size:15px}
-          #pn{position:absolute;inset:0;background:#000b;display:none;align-items:center;justify-content:center}
+          #pn{position:absolute;top:0;left:0;right:0;bottom:0;background:#000b;display:none;align-items:center;justify-content:center}
           #pn.o{display:flex}
-          .card{background:var(--bg2);border-radius:20px;padding:30px;width:560px;display:flex;flex-direction:column;gap:14px}
+          .card{background:var(--bg2);border-radius:20px;padding:30px;width:560px;display:flex;flex-direction:column}
           .card h2{margin:0 0 4px;font-size:24px}
-          .card .row .t{flex:1;height:70px;font-size:17px}
+          .card .row .t{flex:1;height:70px;font-size:16px;padding:0 8px}
           .sw{width:22px;height:22px;border-radius:50%;flex:none}
           #toast{position:fixed;left:50%;bottom:16px;transform:translateX(-50%);background:var(--hi);color:#111;padding:8px 18px;border-radius:20px;font-weight:600;opacity:0;transition:opacity .2s;z-index:9;pointer-events:none}
           #pad{position:fixed;right:10px;bottom:10px;display:grid;grid-template-columns:repeat(3,42px);gap:5px;z-index:8;opacity:.85}
           #pad button{height:42px;border-radius:50%;border:0;background:#2b3b55;color:#fff;font-size:14px}
           #pad button:active{background:var(--hi);color:#111}
           .apps{overflow-x:auto;padding:12px 6px;margin:-12px 0;scrollbar-width:none}.apps::-webkit-scrollbar{display:none}.apps .t{flex:none}
-          .inputs .t{font-size:16px;gap:10px;padding-left:14px;white-space:nowrap}
+          .inputs .t{font-size:16px;padding-left:14px;white-space:nowrap}
           html,body{user-select:none;-webkit-user-select:none;-webkit-tap-highlight-color:transparent;touch-action:manipulation;overscroll-behavior:none}
           @media (hover:hover) and (pointer:fine){#pad{display:none}}
           @media (prefers-reduced-motion:reduce){.t,#sk{transition:none}}
           #in{user-select:text;-webkit-user-select:text}.inputs .ic{width:28px;height:28px}
           #cd.big{width:920px;max-height:640px;overflow-y:auto}.grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}.grid3 .t{height:64px;font-size:16px;justify-content:flex-start;padding:0 14px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;display:flex}
           .top .t{height:48px;padding:0 18px;font-size:16px;flex:none}.top .ic{width:22px;height:22px}
-          #dim,#warm{position:fixed;inset:0;pointer-events:none;z-index:15}#dim{background:#000;opacity:0}#warm{background:#ff9a3c;mix-blend-mode:multiply;opacity:0}
-          #ss{position:fixed;inset:0;background:#000;z-index:20;display:none;color:#fff}#ss.o{display:block}
+          #dim,#warm{position:fixed;top:0;left:0;right:0;bottom:0;pointer-events:none;z-index:15}#dim{background:#000;opacity:0}#warm{background:#ff9a3c;mix-blend-mode:multiply;opacity:0}
+          #ss{position:fixed;top:0;left:0;right:0;bottom:0;background:#000;z-index:20;display:none;color:#fff}#ss.o{display:block}
           #sk{position:absolute;transition:left 2s,top 2s;font-size:96px;font-weight:300;line-height:1}#sk small{display:block;font-size:22px;color:#8da0ba;margin-top:8px}
           </style></head><body>
           <svg width="0" height="0" style="position:absolute"><defs>
@@ -530,7 +699,7 @@ jobs:
           <symbol id="i-palette" viewBox="0 0 24 24"><path d="M12 3a9 9 0 100 18c1.5 0 2-1 1.5-2s0-2 1.5-2h2a3 3 0 003-3c0-6-4-11-8-11z"/></symbol>
           </defs></svg>
           <div id="stage">
-           <div class="top"><div class="brand">Wisdom Home</div><div style="display:flex;align-items:center;gap:22px"><div><span id="clk"></span><span id="dt"></span></div><div class="t" tabindex="0" data-n="Launcher settings"><svg class="ic"><use href="#i-gear"/></svg>Launcher</div></div></div>
+           <div class="top"><div class="brand">Wisdom Home</div><div style="display:flex;align-items:center"><div><span id="clk"></span><span id="dt"></span></div><div class="t" tabindex="0" data-n="Launcher settings"><svg class="ic"><use href="#i-gear"/></svg>Launcher</div></div></div>
            <div class="row" style="gap:20px">
             <div class="t hero" tabindex="0" data-n="Live TV"><span>Wisdom Share</span><small>Smart cloud TV · press OK for Live TV</small></div>
             <div class="inputs" id="inp"></div>
@@ -538,7 +707,6 @@ jobs:
            <h3>Favourite apps</h3>
            <div class="row apps" id="fav"></div>
            <div id="eb"></div>
-           <div class="hint" id="hint">Arrows move · OK opens · Menu opens settings</div>
            <div id="pn"><div class="card" id="cd"></div></div>
           </div>
           <div id="toast"></div><div id="dim"></div><div id="warm"></div><div id="ss"><div id="sk"><span></span><small></small></div></div>
@@ -586,14 +754,14 @@ jobs:
            if(b)b.focus()}
           function panel(){
            const th=[['','Midnight','#2ee6c5'],['sunset','Sunset','#ffb703'],['forest','Forest','#9be564'],['light','Light','#e63946']];
-           $('cd').innerHTML='<h2>Settings</h2><div class="row">'+th.map(a=>'<div class="t" tabindex="0" data-th="'+a[0]+'"><span class="sw" style="background:'+a[2]+'"></span>'+a[1]+'</div>').join('')+'</div><div class="row"><div class="t" tabindex="0" data-p="wp">'+ic('palette')+'Wallpaper</div><div class="t" tabindex="0" data-p="qs">'+ic('gear')+'Quick settings</div></div>'+(HAS?'<div class="row"><div class="t" tabindex="0" data-p="home">'+ic('tv')+'Home mode: '+(Android.homeEnabled()?'On':'Off')+'</div><div class="t" tabindex="0" data-p="orig">'+ic('tv')+'Original home</div><div class="t" tabindex="0" data-p="uninstall">'+ic('trash')+'Uninstall</div></div>':'')+'<div class="row"><div class="t" tabindex="0" data-p="edit">'+ic('edit')+'Edit apps</div><div class="t" tabindex="0" data-p="reset">'+ic('trash')+'Reset</div><div class="t" tabindex="0" data-p="close">'+ic('check')+'Close</div></div>';
+           $('cd').innerHTML='<h2>Settings</h2><div class="row">'+th.map(a=>'<div class="t" tabindex="0" data-th="'+a[0]+'"><span class="sw" style="background:'+a[2]+'"></span>'+a[1]+'</div>').join('')+'</div><div class="row"><div class="t" tabindex="0" data-p="wp">'+ic('palette')+'Wallpaper</div><div class="t" tabindex="0" data-p="qs">'+ic('gear')+'Quick settings</div></div>'+(HAS?'<div class="row"><div class="t" tabindex="0" data-p="home">'+ic('tv')+'Home mode: '+(Android.homeEnabled()?'On':'Off')+'</div><div class="t" tabindex="0" data-p="orig">'+ic('tv')+'Original home</div><div class="t" tabindex="0" data-p="uninstall">'+ic('trash')+'Uninstall</div></div><div class="row"><div class="t" tabindex="0" data-p="hs">'+ic('gear')+'Default Home settings</div><div class="t" tabindex="0" data-p="boot">'+ic('check')+'Start on boot: '+(Android.bootEnabled()?'On':'Off')+'</div></div>':'')+'<div class="row"><div class="t" tabindex="0" data-p="edit">'+ic('edit')+'Edit apps</div><div class="t" tabindex="0" data-p="reset">'+ic('trash')+'Reset</div><div class="t" tabindex="0" data-p="close">'+ic('check')+'Close</div></div>';
            $('pn').classList.add('o');$('cd').querySelector('.t').focus()}
           function closeP(){stopSnake();$('cd').className='card';$('pn').classList.remove('o');const e=document.querySelector('[data-n="Launcher settings"]');e&&e.focus()}
           function ok(){
            if(dlg&&!cur()){submit();return}const c=cur();if(!c)return;const d=c.dataset;if(d.dlg=='ok'){submit();return}if(d.dlg=='no'){cancel();return}
            if(d.th!=null){theme=d.th;save();applyTheme();say('Theme changed');return}
-           if(d.p=='close'){closeP();return}if(d.p=='reset'){if(!rs){rs=1;say('Press OK again to reset');setTimeout(()=>rs=0,4000);return}rs=0;resetAll();return}if(d.p=='wp'){wpPanel();return}if(d.p=='qs'){qsPanel();return}if(d.w!=null){wp=d.w;save();applyWp();say('Wallpaper changed');return}if(d.q){qAct(d.q);return}if(d.g){game(d.g);return}if(d.c!=null){tttMove(+d.c);return}if(d.pk){if(d.m=='add'){favs.push({n:d.pn,i:'grid',p:d.pk});save();closeP();render(favs.length-1)}else{Android.launch(d.pk);closeP()}return}if(d.p=='uninstall'){Android.uninstall();return}if(d.p=='orig'){say(Android.originalHome());return}if(d.p=='home'){Android.setHome(!Android.homeEnabled());say(Android.homeEnabled()?'Home mode on. Choose Just once while testing':'Home mode off');panel();return}
-           if(d.p=='edit'){edit=true;applyTheme();closeP();document.querySelector('[data-f="0"]').focus();$('hint').textContent='Edit mode: OK grabs an app, then ◀ ▶ moves it';return}
+           if(d.p=='close'){closeP();return}if(d.p=='reset'){if(!rs){rs=1;say('Press OK again to reset');setTimeout(()=>rs=0,4000);return}rs=0;resetAll();return}if(d.p=='wp'){wpPanel();return}if(d.p=='qs'){qsPanel();return}if(d.w=='pick'){Android.pickImage();return}if(d.w!=null){wp=d.w;save();applyWp();say('Wallpaper changed');return}if(d.q){qAct(d.q);return}if(d.g){game(d.g);return}if(d.c!=null){tttMove(+d.c);return}if(d.pk){if(d.m=='add'){favs.push({n:d.pn,i:'grid',p:d.pk});save();closeP();render(favs.length-1)}else{Android.launch(d.pk);closeP()}return}if(d.p=='uninstall'){Android.uninstall();return}if(d.p=='hs'){Android.homeSettings();return}if(d.p=='boot'){Android.setBoot(!Android.bootEnabled());say('Start on boot: '+(Android.bootEnabled()?'On':'Off'));panel();return}if(d.p=='orig'){say(Android.originalHome());return}if(d.p=='home'){Android.setHome(!Android.homeEnabled());say(Android.homeEnabled()?'Home mode on. Pick Wisdom Home in the popup, then choose Always':'Home mode off');panel();return}
+           if(d.p=='edit'){edit=true;applyTheme();closeP();document.querySelector('[data-f="0"]').focus();say('Edit mode: press OK on an app to grab it, then use left/right to move it');return}
            if(d.a=='done'){exitEdit();say('Saved');return}
            if(d.a){act(d.a,lastF);return}
            if(d.add&&HAS){appsPanel('add');return}if(d.add){ask('App name','',n=>{favs.push({n:n,i:ICS[favs.length%ICS.length]});save();render(favs.length-1)});return}
@@ -608,7 +776,7 @@ jobs:
           function ask(t,v,cb){dlg=cb;$('cd').innerHTML='<h2>'+t+'</h2><input id="in" maxlength="20" style="font-size:22px;padding:12px;border-radius:12px;border:2px solid var(--hi);background:var(--tile);color:var(--tx)"><div class="row"><div class="t" tabindex="0" data-dlg="ok">'+ic('check')+'Save</div><div class="t" tabindex="0" data-dlg="no">Cancel</div></div>';$('in').value=v;$('pn').classList.add('o');$('in').focus()}
           function submit(){const n=$('in')?$('in').value.trim():'';const cb=dlg;dlg=null;$('pn').classList.remove('o');if(n&&cb)cb(n)}
           function cancel(){dlg=null;$('pn').classList.remove('o');const e=document.querySelector('.t');e&&e.focus()}
-          function exitEdit(){edit=false;grab=null;render();$('hint').textContent='Arrows move · OK opens · Menu opens settings';(document.querySelector('[data-f="0"]')||document.querySelector('.hero')).focus()}
+          function exitEdit(){edit=false;grab=null;render();(document.querySelector('[data-f="0"]')||document.querySelector('.hero')).focus()}
           function key(k){if(snk&&!snk.over&&k.startsWith('Arrow')){sdir(k);return}
            if(k=='Enter')ok();else if(k=='Menu'){if(!dlg){$('pn').classList.contains('o')?closeP():panel()}}
            else if(k=='Escape'){if(dlg)cancel();else if($('pn').classList.contains('o'))closeP();else if(edit)exitEdit()}
@@ -627,10 +795,13 @@ jobs:
            return false}
           function appsPanel(mode){const L=J(Android.apps());$('cd').className='card big';
            $('cd').innerHTML='<h2>'+(mode=='add'?'Add favourite app':'All apps')+' ('+L.length+')</h2><div class="grid3">'+L.map(a=>'<div class="t" tabindex="0" data-pk="'+esc(a.p)+'" data-pn="'+esc(a.n)+'" data-m="'+mode+'">'+esc(a.n)+'</div>').join('')+'</div><div class="row"><div class="t" tabindex="0" data-p="close">'+ic('check')+'Close</div></div>';openP()}
-          function applyWp(){st.style.background=(WP[wp]||WP[''])[1]}
+          function applyWp(){if(wp=='custom'&&HAS&&Android.hasWallpaper()){st.style.background='linear-gradient(rgba(0,0,0,.4),rgba(0,0,0,.6)),url("'+Android.wallpaperData()+'") center/cover no-repeat'}else st.style.background=(WP[wp]||WP[''])[1]}
+          window.onWallpaperPicked=function(){wp='custom';save();applyWp();say('Wallpaper set')};
           function applyQ(){$('dim').style.opacity=(100-qs.b)/100*0.85;$('warm').style.opacity=qs.night?0.35:0}
           function openP(){$('pn').classList.add('o');const e=$('cd').querySelector('.t');e&&e.focus()}
-          function wpPanel(){const k=Object.keys(WP);let h='<h2>Wallpaper</h2>';for(let i=0;i<k.length;i+=3)h+='<div class="row">'+k.slice(i,i+3).map(x=>'<div class="t" tabindex="0" data-w="'+x+'"><span class="sw" style="background:'+(WP[x][1]||'var(--bg2)')+';border:1px solid var(--mu)"></span>'+WP[x][0]+'</div>').join('')+'</div>';$('cd').innerHTML=h+'<div class="row"><div class="t" tabindex="0" data-p="close">'+ic('check')+'Close</div></div>';openP()}
+          function wpPanel(){const k=Object.keys(WP);let h='<h2>Wallpaper</h2>';for(let i=0;i<k.length;i+=3)h+='<div class="row">'+k.slice(i,i+3).map(x=>'<div class="t" tabindex="0" data-w="'+x+'"><span class="sw" style="background:'+(WP[x][1]||'var(--bg2)')+';border:1px solid var(--mu)"></span>'+WP[x][0]+'</div>').join('')+'</div>';
+           if(HAS)h+='<div class="row"><div class="t" tabindex="0" data-w="pick">'+ic('plus')+'Choose image</div>'+(Android.hasWallpaper()?'<div class="t" tabindex="0" data-w="custom">'+ic('palette')+'My image</div>':'')+'</div>';
+           $('cd').innerHTML=h+'<div class="row"><div class="t" tabindex="0" data-p="close">'+ic('check')+'Close</div></div>';openP()}
           function qsPanel(f){const R=(q,l)=>'<div class="t" tabindex="0" data-q="'+q+'">'+l+'</div>',o=v=>v?'On':'Off';
            $('cd').innerHTML='<h2>Quick settings</h2><div class="row">'+R('b-','Brightness − '+qs.b+'%')+R('b+','Brightness +')+'</div><div class="row">'+R('v-','Volume − '+qs.v+'%')+R('v+','Volume +')+'</div><div class="row">'+R('wifi','Wi-Fi settings')+R('bt','Bluetooth settings')+'</div><div class="row">'+R('night','Night light: '+o(qs.night))+R('mute','Mute: '+o(qs.mute))+'</div><div style="color:var(--mu);font-size:14px">Brightness and night light work here. Wi-Fi, Bluetooth and volume open the TV\'s own controls in the real APK.</div><div class="row"><div class="t" tabindex="0" data-p="close">'+ic('check')+'Close</div></div>';
            $('pn').classList.add('o');const e=$('cd').querySelector('[data-q="'+f+'"]')||$('cd').querySelector('.t');e.focus()}
@@ -664,7 +835,8 @@ jobs:
           setInterval(()=>{if(ss.classList.contains('o'))ssMove()},8000);
           render();document.querySelector('.hero').focus();if(HAS){try{qs.v=Android.volume(0);qs.mute=Android.isMuted()}catch(e){}}applyWp();applyQ();wake();
           </script></body></html>
-          EOF_FILE_6
+          EOF_FILE_7
+          echo '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' | base64 -d > wisdom.keystore
       - name: Build APK
         run: gradle assembleDebug --no-daemon
       - uses: actions/upload-artifact@v4
